@@ -26,11 +26,17 @@ EVAL_SEED = 12345
 NUM_EVAL_MAPS = 100
 
 # Training (defaults; override in Colab/notebook as needed)
-TOTAL_TIMESTEPS = 50_000
+TOTAL_TIMESTEPS = 200_000
 PPO_LEARNING_RATE = 3e-4
 PPO_N_STEPS = 2048
 PPO_BATCH_SIZE = 64
+PPO_GAMMA = 0.99
 MODEL_SAVE_PATH = "models/ppo_navigation.zip"
+MODEL_SAVE_PATH_SHAPED = "models/ppo_navigation_shaped.zip"
+
+# Potential-based reward shaping (optional)
+REWARD_SHAPING_ENABLED = False
+REWARD_SHAPING_BETA = 1.0
 
 # Visualization
 CELL_PIXEL_SIZE = 40

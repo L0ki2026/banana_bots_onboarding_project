@@ -9,6 +9,7 @@ import numpy as np
 from gymnasium import spaces
 
 from banana_bots_rl import config
+from banana_bots_rl.diagnostics import PositionTracker
 from banana_bots_rl.map_generator import MapLayout, generate_map
 
 
@@ -71,6 +72,7 @@ class AssistiveNavigationEnv(gym.Env):
         self.facing: int = 0
         self.steps: int = 0
         self.collision_count: int = 0
+        self._position_tracker = PositionTracker()
 
     def _get_obs(self) -> np.ndarray:
         return self._build_observation()
@@ -144,6 +146,8 @@ class AssistiveNavigationEnv(gym.Env):
         """All cells along line except target may block sight; obstacles block."""
         cells = self._bresenham(r0, c0, r1, c1)
         for r, c in cells[:-1]:
+            if not self._in_bounds(r, c):
+                return False
             if self.grid[r, c] == config.OBSTACLE:
                 return False
         return True
@@ -171,10 +175,15 @@ class AssistiveNavigationEnv(gym.Env):
         return points
 
     def _in_bounds(self, r: int, c: int) -> bool:
-        return 0 <= r < self.grid_size and 0 <= c < self.grid_size
+        h, w = self.grid.shape
+        return 0 <= r < h and 0 <= c < w
 
     def _apply_layout(self, layout: MapLayout) -> None:
         self.grid = layout.grid.copy()
+        h, w = self.grid.shape
+        if h != w:
+            raise ValueError("MapLayout grid must be square.")
+        self.grid_size = h
         self.agent_pos = layout.start
         self.goal_pos = layout.goal
         self.facing = int(self.rng.integers(0, 4))
@@ -201,6 +210,7 @@ class AssistiveNavigationEnv(gym.Env):
 
         self.steps = 0
         self.collision_count = 0
+        self._position_tracker.reset(self.agent_pos)
         obs = self._get_obs()
         return obs, {}
 
@@ -235,13 +245,17 @@ class AssistiveNavigationEnv(gym.Env):
         if terminated:
             reward += config.GOAL_REWARD
 
-        truncated = self.steps >= self.max_steps
+        truncated = self.steps >= self.max_steps and not terminated
+        self._position_tracker.record(self.agent_pos)
         obs = self._get_obs()
         info = {
             "collision": collision,
             "collisions_total": self.collision_count,
             "steps": self.steps,
-            "success": terminated,
+            "success": bool(terminated),
+            "agent_pos": self.agent_pos,
+            "two_cell_oscillations": self._position_tracker.two_cell_oscillations,
+            "repeated_positions": self._position_tracker.repeated_positions,
         }
         return obs, float(reward), terminated, truncated, info
 
