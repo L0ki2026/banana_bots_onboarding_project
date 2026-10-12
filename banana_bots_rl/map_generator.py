@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import numpy as np
 
 from banana_bots_rl import config
+
+Difficulty = Literal["easy", "medium", "hard"]
 
 
 @dataclass
@@ -47,7 +49,11 @@ def path_exists(grid: np.ndarray, start: Tuple[int, int], goal: Tuple[int, int])
     return False
 
 
-def _random_start_goal(rng: np.random.Generator, grid: np.ndarray) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
+def _random_start_goal(
+    rng: np.random.Generator,
+    grid: np.ndarray,
+    min_path_length: int = config.MIN_PATH_LENGTH,
+) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
     h, w = grid.shape
     candidates = [
         (r, c)
@@ -60,7 +66,7 @@ def _random_start_goal(rng: np.random.Generator, grid: np.ndarray) -> Optional[T
     for _ in range(200):
         i, j = rng.choice(len(candidates), size=2, replace=False)
         start, goal = candidates[i], candidates[j]
-        if manhattan_dist(start, goal) >= config.MIN_PATH_LENGTH:
+        if manhattan_dist(start, goal) >= min_path_length:
             return start, goal
     return None
 
@@ -69,12 +75,31 @@ def manhattan_dist(a: Tuple[int, int], b: Tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+def generate_empty_map(
+    size: int = config.GRID_SIZE,
+    rng: Optional[np.random.Generator] = None,
+    min_path_length: int = config.CURRICULUM_EASY_MIN_PATH,
+) -> MapLayout:
+    """Easy curriculum: empty grid, random start and goal."""
+    if rng is None:
+        rng = np.random.default_rng()
+    grid = np.zeros((size, size), dtype=np.int32)
+    pair = _random_start_goal(rng, grid, min_path_length=min_path_length)
+    if pair is None:
+        start, goal = (0, 0), (size - 1, size - 1)
+    else:
+        start, goal = pair
+    grid[goal[0], goal[1]] = config.GOAL
+    return MapLayout(grid=grid.copy(), start=start, goal=goal)
+
+
 def generate_map(
     size: int = config.GRID_SIZE,
     obstacle_density: float = config.OBSTACLE_DENSITY,
     grass_density: float = config.GRASS_DENSITY,
     rng: Optional[np.random.Generator] = None,
     max_attempts: int = 100,
+    min_path_length: int = config.MIN_PATH_LENGTH,
 ) -> MapLayout:
     """
     Build a random grid with obstacles and grass; ensure start/goal are connected.
@@ -99,7 +124,7 @@ def generate_map(
             if grid[r, c] == config.EMPTY:
                 grid[r, c] = config.GRASS
 
-        pair = _random_start_goal(rng, grid)
+        pair = _random_start_goal(rng, grid, min_path_length=min_path_length)
         if pair is None:
             continue
         start, goal = pair
@@ -109,6 +134,28 @@ def generate_map(
             return MapLayout(grid=grid.copy(), start=start, goal=goal)
 
     raise RuntimeError("Failed to generate a solvable map; try lower obstacle density.")
+
+
+def generate_map_for_difficulty(
+    difficulty: Difficulty = "hard",
+    size: int = config.GRID_SIZE,
+    rng: Optional[np.random.Generator] = None,
+) -> MapLayout:
+    """Curriculum map generator: easy, medium, or full procedural hard."""
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if difficulty == "easy":
+        return generate_empty_map(size=size, rng=rng)
+    if difficulty == "medium":
+        return generate_map(
+            size=size,
+            obstacle_density=config.CURRICULUM_MEDIUM_OBSTACLE_DENSITY,
+            grass_density=config.CURRICULUM_MEDIUM_GRASS_DENSITY,
+            rng=rng,
+            min_path_length=config.MIN_PATH_LENGTH,
+        )
+    return generate_map(size=size, rng=rng)
 
 
 def generate_eval_maps(

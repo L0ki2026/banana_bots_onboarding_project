@@ -167,6 +167,25 @@ def test_two_cell_oscillation_detection() -> None:
     assert count_two_cell_oscillations(positions) == 3
 
 
+def test_agent_frame_goal_direction(env: AssistiveNavigationEnv) -> None:
+    layout = _empty_layout(start=(2, 2), goal=(2, 6))
+    env.reset(options={"layout": layout})
+    env.facing = 1  # East
+    vec = env._goal_direction_agent_frame()
+    assert vec[0] > 0.9  # goal is ahead
+    assert abs(vec[1]) < 0.1
+
+
+def test_curriculum_map_generators() -> None:
+    from banana_bots_rl.map_generator import generate_map_for_difficulty
+
+    rng = np.random.default_rng(0)
+    easy = generate_map_for_difficulty("easy", size=12, rng=rng)
+    assert np.sum(easy.grid == config.OBSTACLE) == 0
+    medium = generate_map_for_difficulty("medium", size=12, rng=rng)
+    assert medium.grid.shape == (12, 12)
+
+
 def test_env_tracks_two_cell_oscillation(env: AssistiveNavigationEnv) -> None:
     layout = _empty_layout(start=(7, 7), goal=(0, 0))
     env.reset(options={"layout": layout})

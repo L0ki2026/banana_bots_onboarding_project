@@ -31,12 +31,26 @@ PPO_LEARNING_RATE = 3e-4
 PPO_N_STEPS = 2048
 PPO_BATCH_SIZE = 64
 PPO_GAMMA = 0.99
-MODEL_SAVE_PATH = "models/ppo_navigation.zip"
+PPO_ENT_COEF = 0.02
+
+# Checkpoints (do not overwrite without --overwrite)
+MODEL_SAVE_PATH_BASELINE = "models/ppo_navigation_baseline.zip"
 MODEL_SAVE_PATH_SHAPED = "models/ppo_navigation_shaped.zip"
+MODEL_SAVE_PATH_CURRICULUM = "models/ppo_navigation_curriculum.zip"
+# Legacy alias
+MODEL_SAVE_PATH = MODEL_SAVE_PATH_BASELINE
 
 # Potential-based reward shaping (optional)
 REWARD_SHAPING_ENABLED = False
 REWARD_SHAPING_BETA = 1.0
+
+# Curriculum training
+CURRICULUM_EASY_MIN_PATH = 5
+CURRICULUM_MEDIUM_OBSTACLE_DENSITY = 0.05
+CURRICULUM_MEDIUM_GRASS_DENSITY = 0.08
+CURRICULUM_SUCCESS_THRESHOLD = 0.65
+CURRICULUM_WINDOW_EPISODES = 40
+CURRICULUM_START_DIFFICULTY = "easy"
 
 # Visualization
 CELL_PIXEL_SIZE = 40

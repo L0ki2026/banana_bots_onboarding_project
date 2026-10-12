@@ -13,6 +13,7 @@ import numpy as np
 from banana_bots_rl import config
 from banana_bots_rl.environment import AssistiveNavigationEnv
 from banana_bots_rl.map_generator import MapLayout, generate_eval_maps
+from banana_bots_rl.model_utils import load_ppo_for_env, validate_observation_space
 
 
 @dataclass
@@ -122,15 +123,52 @@ def eval_seeds_for_maps(n: int, base: int = config.EVAL_SEED) -> List[int]:
     return [int(x) for x in rng.integers(0, 2**31 - 1, size=n)]
 
 
+def evaluate_model_paths(
+    model_paths: List[Path],
+    n_maps: int = config.NUM_EVAL_MAPS,
+) -> Dict[str, EvalSummary]:
+    layouts = load_or_create_eval_maps(n=n_maps)
+    seeds = eval_seeds_for_maps(n_maps)
+    probe_env = AssistiveNavigationEnv(procedural=False, render_mode=None)
+
+    summaries: Dict[str, EvalSummary] = {
+        "random": evaluate_on_maps(
+            layouts, random_policy, name="random", eval_seeds=seeds
+        ),
+    }
+
+    for path in model_paths:
+        model = load_ppo_for_env(path, probe_env)
+        stem = path.stem
+        summaries[f"{stem}_deterministic"] = evaluate_on_maps(
+            layouts,
+            sb3_policy(model, deterministic=True),
+            name=f"{stem}_deterministic",
+            eval_seeds=seeds,
+        )
+        summaries[f"{stem}_stochastic"] = evaluate_on_maps(
+            layouts,
+            sb3_policy(model, deterministic=False),
+            name=f"{stem}_stochastic",
+            eval_seeds=seeds,
+        )
+    return summaries
+
+
 def compare_agents(
     model=None,
     model_original=None,
     model_shaped=None,
     n_maps: int = config.NUM_EVAL_MAPS,
     save_path: Optional[Path] = None,
+    extra_model_paths: Optional[List[str]] = None,
 ) -> Dict[str, EvalSummary]:
-    if model_original is None and model is not None:
-        model_original = model
+    paths: List[Path] = []
+    if extra_model_paths:
+        paths.extend(Path(p) for p in extra_model_paths)
+    if model_original is not None or model is not None:
+        pass  # legacy in-memory models handled below
+
     layouts = load_or_create_eval_maps(n=n_maps)
     seeds = eval_seeds_for_maps(n_maps)
     summaries: Dict[str, EvalSummary] = {
@@ -138,32 +176,38 @@ def compare_agents(
             layouts, random_policy, name="random", eval_seeds=seeds
         ),
     }
+
+    probe_env = AssistiveNavigationEnv(procedural=False, render_mode=None)
+
+    def add_model(model_obj, prefix: str) -> None:
+        validate_observation_space(model_obj, probe_env)
+        summaries[f"{prefix}_deterministic"] = evaluate_on_maps(
+            layouts,
+            sb3_policy(model_obj, deterministic=True),
+            name=f"{prefix}_deterministic",
+            eval_seeds=seeds,
+        )
+        summaries[f"{prefix}_stochastic"] = evaluate_on_maps(
+            layouts,
+            sb3_policy(model_obj, deterministic=False),
+            name=f"{prefix}_stochastic",
+            eval_seeds=seeds,
+        )
+
+    if model_original is None and model is not None:
+        model_original = model
     if model_original is not None:
-        summaries["ppo_original_deterministic"] = evaluate_on_maps(
-            layouts,
-            sb3_policy(model_original, deterministic=True),
-            name="ppo_original_deterministic",
-            eval_seeds=seeds,
-        )
-        summaries["ppo_original_stochastic"] = evaluate_on_maps(
-            layouts,
-            sb3_policy(model_original, deterministic=False),
-            name="ppo_original_stochastic",
-            eval_seeds=seeds,
-        )
+        add_model(model_original, "ppo_original")
     if model_shaped is not None:
-        summaries["ppo_shaped_deterministic"] = evaluate_on_maps(
-            layouts,
-            sb3_policy(model_shaped, deterministic=True),
-            name="ppo_shaped_deterministic",
-            eval_seeds=seeds,
-        )
-        summaries["ppo_shaped_stochastic"] = evaluate_on_maps(
-            layouts,
-            sb3_policy(model_shaped, deterministic=False),
-            name="ppo_shaped_stochastic",
-            eval_seeds=seeds,
-        )
+        add_model(model_shaped, "ppo_shaped")
+
+    if paths:
+        for path in paths:
+            if not path.exists():
+                print(f"Warning: model not found at {path}")
+                continue
+            m = load_ppo_for_env(path, probe_env)
+            add_model(m, path.stem)
 
     if save_path:
         save_path = Path(save_path)
@@ -189,16 +233,22 @@ def print_summary(summary: EvalSummary) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate navigation agents on held-out maps")
     parser.add_argument(
+        "--model-path",
+        action="append",
+        default=[],
+        help="PPO checkpoint (.zip); may be repeated for multiple models",
+    )
+    parser.add_argument(
         "--model-original",
         type=str,
-        default=config.MODEL_SAVE_PATH,
-        help="Path to original PPO checkpoint",
+        default=None,
+        help="Legacy alias for a single checkpoint path",
     )
     parser.add_argument(
         "--model-shaped",
         type=str,
         default=None,
-        help="Path to reward-shaped PPO checkpoint (optional)",
+        help="Optional second checkpoint (legacy compare)",
     )
     parser.add_argument("--n-maps", type=int, default=config.NUM_EVAL_MAPS)
     parser.add_argument(
@@ -214,29 +264,28 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    model_original = None
-    model_shaped = None
-    if not args.skip_ppo:
-        from stable_baselines3 import PPO
+    paths = [Path(p) for p in args.model_path]
+    if args.model_original:
+        paths.append(Path(args.model_original))
+    if args.model_shaped:
+        paths.append(Path(args.model_shaped))
 
-        orig_path = Path(args.model_original)
-        if orig_path.exists():
-            model_original = PPO.load(str(orig_path))
-        else:
-            print(f"Warning: original model not found at {orig_path}")
-        if args.model_shaped:
-            shaped_path = Path(args.model_shaped)
-            if shaped_path.exists():
-                model_shaped = PPO.load(str(shaped_path))
-            else:
-                print(f"Warning: shaped model not found at {shaped_path}")
+    if args.skip_ppo or not paths:
+        layouts = load_or_create_eval_maps(n=args.n_maps)
+        seeds = eval_seeds_for_maps(args.n_maps)
+        summaries = {
+            "random": evaluate_on_maps(
+                layouts, random_policy, name="random", eval_seeds=seeds
+            )
+        }
+    else:
+        summaries = evaluate_model_paths(paths, n_maps=args.n_maps)
 
-    summaries = compare_agents(
-        model_original=model_original,
-        model_shaped=model_shaped,
-        n_maps=args.n_maps,
-        save_path=Path(args.output),
-    )
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w") as f:
+        json.dump({k: v.to_dict() for k, v in summaries.items()}, f, indent=2)
+
     for summary in summaries.values():
         print_summary(summary)
 

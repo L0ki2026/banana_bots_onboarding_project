@@ -10,7 +10,7 @@ from gymnasium import spaces
 
 from banana_bots_rl import config
 from banana_bots_rl.diagnostics import PositionTracker
-from banana_bots_rl.map_generator import MapLayout, generate_map
+from banana_bots_rl.map_generator import Difficulty, MapLayout, generate_map, generate_map_for_difficulty
 
 
 # Facing: 0=North (-row), 1=East (+col), 2=South (+row), 3=West (-col)
@@ -38,6 +38,7 @@ class AssistiveNavigationEnv(gym.Env):
         render_mode: Optional[str] = None,
         fixed_layout: Optional[MapLayout] = None,
         procedural: bool = True,
+        difficulty: Difficulty = "hard",
         rng: Optional[np.random.Generator] = None,
     ):
         super().__init__()
@@ -47,12 +48,13 @@ class AssistiveNavigationEnv(gym.Env):
         self.render_mode = render_mode
         self.fixed_layout = fixed_layout
         self.procedural = procedural and fixed_layout is None
+        self.difficulty: Difficulty = difficulty
         self.rng = rng if rng is not None else np.random.default_rng()
 
         self.action_space = spaces.Discrete(4)
 
         patch_side = 2 * view_distance + 1
-        # Local cell types (unknown = -1 encoded as 4 in one-hot) + goal deltas + facing one-hot
+        # Local patch + agent-frame goal direction (forward, left) + facing one-hot
         self._n_cell_types = 5  # empty, grass, obstacle, goal, unknown
         patch_size = patch_side * patch_side * self._n_cell_types
         obs_low = np.zeros(patch_size + 2 + 4, dtype=np.float32)
@@ -111,15 +113,26 @@ class AssistiveNavigationEnv(gym.Env):
                 else:
                     patch[pr, pc, 0] = 1.0
 
-        gx = self.goal_pos[0] - self.agent_pos[0]
-        gy = self.goal_pos[1] - self.agent_pos[1]
-        norm = max(1.0, np.hypot(gx, gy))
-        goal_vec = np.array([gx / norm, gy / norm], dtype=np.float32)
+        goal_vec = self._goal_direction_agent_frame()
 
         facing_oh = np.zeros(4, dtype=np.float32)
         facing_oh[self.facing] = 1.0
 
         return np.concatenate([patch.flatten(), goal_vec, facing_oh]).astype(np.float32)
+
+    def _goal_direction_agent_frame(self) -> np.ndarray:
+        """
+        Unit goal direction projected onto forward and left strafe axes.
+        Makes orientation-relative actions easier to learn than world-frame deltas alone.
+        """
+        d_row = self.goal_pos[0] - self.agent_pos[0]
+        d_col = self.goal_pos[1] - self.agent_pos[1]
+        norm = max(1.0, np.hypot(d_row, d_col))
+        forward = DIR_DELTA[self.facing]
+        left = STRAFE_LEFT[self.facing]
+        goal_forward = (d_row * forward[0] + d_col * forward[1]) / norm
+        goal_left = (d_row * left[0] + d_col * left[1]) / norm
+        return np.array([goal_forward, goal_left], dtype=np.float32)
 
     def _agent_to_world(self, dr: int, dc: int) -> Tuple[int, int]:
         """Map agent-relative (forward=+dr up) offsets to world grid deltas."""
@@ -203,7 +216,9 @@ class AssistiveNavigationEnv(gym.Env):
         elif self.fixed_layout is not None:
             self._apply_layout(self.fixed_layout)
         elif self.procedural:
-            layout = generate_map(size=self.grid_size, rng=self.rng)
+            layout = generate_map_for_difficulty(
+                self.difficulty, size=self.grid_size, rng=self.rng
+            )
             self._apply_layout(layout)
         else:
             raise ValueError("No layout source: set procedural, fixed_layout, or pass options['layout'].")
@@ -212,7 +227,7 @@ class AssistiveNavigationEnv(gym.Env):
         self.collision_count = 0
         self._position_tracker.reset(self.agent_pos)
         obs = self._get_obs()
-        return obs, {}
+        return obs, {"difficulty": self.difficulty}
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         assert self.action_space.contains(action)

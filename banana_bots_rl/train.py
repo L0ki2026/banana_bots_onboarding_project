@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Literal
 
 import gymnasium as gym
 import matplotlib
@@ -13,13 +14,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 
 from banana_bots_rl import config
+from banana_bots_rl.curriculum import CurriculumCallback
 from banana_bots_rl.environment import AssistiveNavigationEnv
+from banana_bots_rl.map_generator import Difficulty
+from banana_bots_rl.model_utils import ensure_save_path
 from banana_bots_rl.reward_shaping import PotentialBasedRewardShaping
 from banana_bots_rl.utils import rolling_mean
+
+TrainingMode = Literal["baseline", "shaped", "curriculum"]
 
 
 class EpisodeMetricsCallback(BaseCallback):
@@ -57,8 +63,13 @@ def make_train_env(
     *,
     reward_shaping: bool = False,
     shaping_beta: float = config.REWARD_SHAPING_BETA,
+    difficulty: Difficulty = "hard",
 ) -> gym.Env:
-    env = AssistiveNavigationEnv(procedural=True, render_mode=None)
+    env = AssistiveNavigationEnv(
+        procedural=True,
+        render_mode=None,
+        difficulty=difficulty,
+    )
     if reward_shaping:
         env = PotentialBasedRewardShaping(
             env,
@@ -91,9 +102,18 @@ def build_model(env: gym.Env, seed: int = config.RANDOM_SEED) -> PPO:
         n_steps=config.PPO_N_STEPS,
         batch_size=config.PPO_BATCH_SIZE,
         gamma=config.PPO_GAMMA,
+        ent_coef=config.PPO_ENT_COEF,
         verbose=1,
         seed=seed,
     )
+
+
+def default_save_path(mode: TrainingMode, reward_shaping: bool) -> str:
+    if mode == "curriculum":
+        return config.MODEL_SAVE_PATH_CURRICULUM
+    if mode == "shaped" or reward_shaping:
+        return config.MODEL_SAVE_PATH_SHAPED
+    return config.MODEL_SAVE_PATH_BASELINE
 
 
 def plot_training_rewards(
@@ -123,41 +143,63 @@ def plot_training_rewards(
 
 def train(
     total_timesteps: int = config.TOTAL_TIMESTEPS,
-    save_path: str = config.MODEL_SAVE_PATH,
+    save_path: str = config.MODEL_SAVE_PATH_BASELINE,
     plot_path: str = "plots/training_reward.png",
     seed: int = config.RANDOM_SEED,
     reward_shaping: bool = False,
     shaping_beta: float = config.REWARD_SHAPING_BETA,
+    mode: TrainingMode = "baseline",
+    overwrite: bool = False,
 ) -> PPO:
-    env = make_train_env(seed, reward_shaping=reward_shaping, shaping_beta=shaping_beta)
+    use_curriculum = mode == "curriculum"
+    start_difficulty: Difficulty = (
+        config.CURRICULUM_START_DIFFICULTY if use_curriculum else "hard"
+    )
+    if use_curriculum and not reward_shaping:
+        reward_shaping = True
+
+    env = make_train_env(
+        seed,
+        reward_shaping=reward_shaping,
+        shaping_beta=shaping_beta,
+        difficulty=start_difficulty,
+    )
 
     try:
         from gymnasium.utils.env_checker import check_env
 
-        check_env(AssistiveNavigationEnv(procedural=True), skip_render_check=True)
+        check_env(
+            AssistiveNavigationEnv(procedural=True, difficulty="easy"),
+            skip_render_check=True,
+        )
     except Exception as e:
         print(f"Env checker note: {e}")
 
+    save_file = ensure_save_path(save_path, overwrite=overwrite)
+
     model = build_model(env, seed=seed)
-    callback = EpisodeMetricsCallback()
+    metrics_cb = EpisodeMetricsCallback()
+    callbacks: list[BaseCallback] = [metrics_cb]
+    if use_curriculum:
+        callbacks.append(CurriculumCallback(env))
 
     print(
-        f"Training PPO for {total_timesteps} timesteps "
-        f"(seed={seed}, reward_shaping={reward_shaping}, beta={shaping_beta})"
+        f"Training PPO mode={mode} for {total_timesteps} timesteps "
+        f"(seed={seed}, reward_shaping={reward_shaping}, beta={shaping_beta}, "
+        f"start_difficulty={start_difficulty})"
     )
-    model.learn(total_timesteps=total_timesteps, callback=callback)
+    model.learn(total_timesteps=total_timesteps, callback=CallbackList(callbacks))
 
-    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    model.save(save_path)
-    print(f"Saved model to {save_path}")
+    model.save(str(save_file))
+    print(f"Saved model to {save_file}")
 
-    rewards = callback.episode_rewards
+    rewards = metrics_cb.episode_rewards
     if rewards:
         print(
             f"Episodes: {len(rewards)}, "
-            f"mean success: {np.mean(callback.episode_success):.1%}, "
-            f"mean length: {np.mean(callback.episode_lengths):.1f}, "
-            f"mean 2-cell oscillations: {np.mean(callback.episode_oscillations):.2f}"
+            f"mean success: {np.mean(metrics_cb.episode_success):.1%}, "
+            f"mean length: {np.mean(metrics_cb.episode_lengths):.1f}, "
+            f"mean 2-cell oscillations: {np.mean(metrics_cb.episode_oscillations):.2f}"
         )
     plot_training_rewards(rewards, save_path=Path(plot_path) if plot_path else None)
 
@@ -170,9 +212,15 @@ def main():
     parser.add_argument("--save", type=str, default=None)
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
     parser.add_argument(
+        "--mode",
+        choices=("baseline", "shaped", "curriculum"),
+        default="baseline",
+        help="baseline=hard maps; shaped=hard+PBRS; curriculum=easy->hard+PBRS",
+    )
+    parser.add_argument(
         "--reward-shaping",
         action="store_true",
-        help="Enable potential-based reward shaping during training",
+        help="Enable potential-based reward shaping (default for shaped/curriculum modes)",
     )
     parser.add_argument(
         "--shaping-beta",
@@ -186,24 +234,25 @@ def main():
         default="plots/training_reward.png",
         help="Path for training reward plot",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing checkpoint file",
+    )
     args = parser.parse_args()
 
-    if args.save is None:
-        save_path = (
-            config.MODEL_SAVE_PATH_SHAPED
-            if args.reward_shaping
-            else config.MODEL_SAVE_PATH
-        )
-    else:
-        save_path = args.save
+    reward_shaping = args.reward_shaping or args.mode in ("shaped", "curriculum")
+    save_path = args.save or default_save_path(args.mode, reward_shaping)
 
     train(
         total_timesteps=args.timesteps,
         save_path=save_path,
         plot_path=args.plot,
         seed=args.seed,
-        reward_shaping=args.reward_shaping,
+        reward_shaping=reward_shaping,
         shaping_beta=args.shaping_beta,
+        mode=args.mode,
+        overwrite=args.overwrite,
     )
 
 
